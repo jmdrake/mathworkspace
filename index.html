@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>MathWorks Dashboard</title>
+
+<!-- PouchDB -->
+<script src="https://cdn.jsdelivr.net/npm/pouchdb@7.3.1/dist/pouchdb.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/pouchdb@7.3.1/dist/pouchdb.find.min.js"></script>
+
+<style>
+  body { font-family: system-ui, sans-serif; margin: 20px; background: #f4f4f8; }
+  .card { background:#fff; padding:15px; border-radius:10px; margin-bottom:15px;
+          box-shadow:0 1px 3px rgba(0,0,0,0.2); }
+  .button { background:#3366cc; color:#fff; border:none; padding:6px 12px;
+            border-radius:6px; cursor:pointer; }
+  .button.small { font-size:0.8em; padding:4px 8px; }
+  .button.secondary { background:#666; }
+  #userInfo { margin-bottom:10px; font-size:0.9em; }
+  .badge { background:#eee; padding:2px 6px; border-radius:5px; margin-left:6px; }
+.hidden {
+  display: none !important;
+.form-row {
+  margin-bottom: 12px;
+}
+
+.form-row label {
+  display: block;
+  margin-bottom: 4px;
+  font-weight: 600;
+}
+
+.form-row input,
+.form-row textarea {
+  width: 100%;
+  padding: 6px;
+  border-radius: 6px;
+  border: 1px solid #ccc;
+  box-sizing: border-box;
+}
+    
+}
+    
+</style>
+</head>
+<body>
+
+<h1>MathWorks Dashboard</h1>
+<div id="userInfo"></div>
+
+<div id="loginBox" class="card">
+  <h3>Login</h3>
+  <label>Username:</label>
+  <input id="usernameInput" type="text">
+  <label>PIN:</label>
+  <input id="pinInput" type="password" maxlength="4">
+  <button class="button" id="btnLogin">Login</button>
+  <button class="button secondary" id="btnRegister">Register</button>
+  <div id="loginMsg" style="color:red;margin-top:6px;"></div>
+</div>
+
+<div id="dashboard" class="hidden">
+  <div id="lessonList"></div>
+
+    <div id="createLessonCard" class="card hidden">
+      <h3>Create Lesson (Teacher)</h3>
+
+      <div class="form-row">
+        <label>Lesson ID:</label><br/>
+        <input id="lessonIdInput" placeholder="7.4-sum-to-product">
+      </div>
+
+      <div class="form-row">
+        <label>Title:</label><br/>
+        <input id="lessonTitleInput" placeholder="OpenStax 7.4 — Sum to Product">
+      </div>
+
+      <div class="form-row"><br/>
+        <label>Description:</label><br/>
+        <textarea id="lessonDescInput" rows="3"></textarea>
+      </div>
+
+      <button class="button small" id="btnCreateLesson">Create</button>
+      <div id="lessonCreateMsg" style="color:green; margin-top:6px;"></div>
+    </div>
+
+
+  <button class="button secondary" id="btnLogout">Logout</button>
+</div>
+
+<script>
+// --------------------------
+// CONFIG (same values you use in mathworks.js)
+// --------------------------
+const key = "apikey-31961a88dab14c3a81794b3e84c37bfd";
+const pwd = "0185d38d9d48d337c3766ebc11b237b2c3a71335";
+const server = "7c287143-8753-4717-a3a7-f69f6a6499b4-bluemix.cloudant.com";
+const dbase = "mathchat";
+
+const dburl  = "https://" + key + ":" + pwd + "@" + server + "/" + dbase;
+
+const db       = new PouchDB(dbase);
+const remoteDB = new PouchDB(dburl);
+
+db.sync(remoteDB, { live:true, retry:true });
+
+// --------------------------
+// DOM helpers
+// --------------------------
+const $ = id => document.getElementById(id);
+
+const loginBox         = $("loginBox");
+const dashboard        = $("dashboard");
+const userInfo         = $("userInfo");
+const lessonList       = $("lessonList");
+const createLessonCard = $("createLessonCard");
+const lessonCreateMsg  = $("lessonCreateMsg");
+
+let currentUser = null;
+
+// --------------------------
+// USER AUTH
+// --------------------------
+function saveUserLocal() {
+  localStorage.setItem("mathworksUser", JSON.stringify(currentUser));
+}
+
+function loadUserLocal() {
+  const raw = localStorage.getItem("mathworksUser");
+  if (!raw) return null;
+  try { return JSON.parse(raw); }
+  catch { return null; }
+}
+
+async function login(username, pin) {
+  try {
+    const doc = await db.get("user:" + username);
+    if (doc.pin !== pin) return null;
+    return { username: doc.username, role: doc.role || "student" };
+  } catch {
+    return null;
+  }
+}
+
+$("btnLogin").onclick = async () => {
+  const u = $("usernameInput").value.trim();
+  const p = $("pinInput").value.trim();
+  if (!u || !p) return;
+
+  const user = await login(u,p);
+  if (!user) {
+    $("loginMsg").textContent = "Invalid login.";
+    return;
+  }
+  currentUser = user;
+  saveUserLocal();
+  showDashboard();
+};
+
+$("btnRegister").onclick = async () => {
+  const u = $("usernameInput").value.trim();
+  const p = $("pinInput").value.trim();
+  if (!u || p.length !== 4) {
+    $("loginMsg").textContent = "Username & 4-digit PIN required.";
+    return;
+  }
+  try {
+    await db.get("user:" + u);
+    $("loginMsg").textContent = "User already exists.";
+  } catch (err) {
+    if (err.status === 404) {
+      await db.put({
+        _id: "user:" + u,
+        type: "user",
+        username: u,
+        pin: p,
+        role: "student"
+      });
+      $("loginMsg").style.color = "green";
+      $("loginMsg").textContent = "User created. Log in now.";
+    }
+  }
+};
+
+$("btnLogout").onclick = () => {
+  currentUser = null;
+  localStorage.removeItem("mathworksUser");
+  location.reload();
+};
+
+// --------------------------
+// LOAD LESSONS
+// --------------------------
+async function loadLessons() {
+  const res = await db.find({
+    selector: { type: "lesson" },
+    sort: [{ _id: "asc" }]
+  }).catch(async err => {
+    if (err.status === 404) {
+      await db.createIndex({ index: { fields: ["type"] }});
+      return db.find({ selector: { type: "lesson" }});
+    }
+  });
+
+  const docs = res.docs || [];
+  lessonList.innerHTML = "";
+
+  if (!docs.length) {
+    lessonList.innerHTML = "<p>No lessons yet.</p>";
+    return;
+  }
+
+  docs.forEach(lesson => {
+    const div = document.createElement("div");
+    div.className = "card";
+    div.innerHTML = `
+      <strong>${lesson.title}</strong>
+      <div style="font-size:0.85em;color:#555;">${lesson.description || ""}</div>
+      <button class="button small" data-id="${lesson._id}">Open Lesson</button>
+    `;
+    lessonList.appendChild(div);
+  });
+
+  // Attach event handlers
+  lessonList.querySelectorAll("button[data-id]").forEach(btn => {
+    btn.onclick = () => {
+      const fullId = btn.getAttribute("data-id");        // "lesson:7.4-sum-to-product"
+      const shortId = fullId.replace("lesson:","");      // "7.4-sum-to-product"
+      location.href = "mathworks.html?lesson=" + encodeURIComponent(shortId);
+    };
+  });
+}
+
+// --------------------------
+// CREATE LESSON (teacher)
+// --------------------------
+$("btnCreateLesson").onclick = async () => {
+  const id    = $("lessonIdInput").value.trim();
+  const title = $("lessonTitleInput").value.trim();
+  const desc  = $("lessonDescInput").value.trim();
+
+  if (!id || !title) {
+    lessonCreateMsg.style.color = "red";
+    lessonCreateMsg.textContent = "Lesson ID and title required.";
+    return;
+  }
+
+  const fullId = "lesson:" + id;
+  try {
+    await db.get(fullId);
+    lessonCreateMsg.style.color = "red";
+    lessonCreateMsg.textContent = "Lesson ID already exists.";
+  } catch (err) {
+    if (err.status === 404) {
+      await db.put({
+        _id: fullId,
+        type: "lesson",
+        title,
+        description: desc,
+        createdAt: new Date().toISOString()
+      });
+      lessonCreateMsg.style.color = "green";
+      lessonCreateMsg.textContent = "Lesson created.";
+      $("lessonIdInput").value = "";
+      $("lessonTitleInput").value = "";
+      $("lessonDescInput").value = "";
+      await loadLessons();
+    }
+  }
+};
+
+// --------------------------
+// DASHBOARD UI
+// --------------------------
+function showDashboard() {
+  $("loginBox").classList.add("hidden");
+  $("dashboard").classList.remove("hidden");
+
+  userInfo.innerHTML =
+    `Logged in as <strong>${currentUser.username}</strong>
+     <span class="badge">${currentUser.role}</span>`;
+
+  if (currentUser.role === "teacher") {
+    createLessonCard.classList.remove("hidden");
+  } else {
+    createLessonCard.classList.add("hidden");
+  }
+
+  loadLessons();
+}
+
+// --------------------------
+// INIT
+// --------------------------
+(async function init() {
+  currentUser = loadUserLocal();
+  if (currentUser) {
+    showDashboard();
+  }
+})();
+    
+// Auto-login dashboard adjustments
+document.addEventListener("DOMContentLoaded", () => {
+  const user = JSON.parse(localStorage.getItem("mathworksUser") || "null");
+  if (user && user.username) {
+
+    // Hide login + show dashboard
+    const box = document.getElementById("loginBox");
+    if (box) box.classList.add("hidden");
+
+    const dash = document.getElementById("dashboard");
+    if (dash) dash.classList.remove("hidden");
+
+    // User info
+    const ui = document.getElementById("userInfo");
+    if (ui) {
+      ui.innerHTML =
+        `Logged in as <strong>${user.username}</strong>
+         <span class="badge">${user.role}</span>`;
+    }
+
+    // PATCH #2: teacher-only create lesson visibility
+    const createBox = document.getElementById("createLessonCard");
+    if (createBox) {
+      if (user.role === "teacher") {
+        createBox.classList.remove("hidden");
+      } else {
+        createBox.classList.add("hidden");
+      }
+    }
+  }
+});    
+</script>
+</body>
+</html>
