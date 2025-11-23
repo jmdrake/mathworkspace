@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Math Study Guide</title>
+
+<!-- W3.CSS -->
+<link rel="stylesheet" href="https://www.w3schools.com/w3css/4/w3.css">
+
+<!-- MathJax AsciiMath -->
+<script>
+window.MathJax = {
+  loader: { load: ['input/asciimath', 'output/chtml'] },
+  asciimath: { delimiters: [['%%','%%']] },
+  startup: { typeset:false }
+};
+</script>
+<script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/startup.js"></script>
+
+<!-- Marked.js for Markdown -->
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+
+<!-- math.js -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/mathjs/11.8.0/math.js"></script>
+
+<!-- PouchDB -->
+<script src="https://cdn.jsdelivr.net/npm/pouchdb@7.3.1/dist/pouchdb.min.js"></script>
+
+</head>
+<body class="w3-light-grey">
+
+<!-- HEADER -->
+<header class="w3-container w3-blue w3-padding">
+  <div class="w3-row">
+    <div class="w3-col s6">
+      <h2>Math Study Guide</h2>
+    </div>
+
+    <div class="w3-col s6" style="text-align:right; margin-top:10px;">
+
+      <button
+        onclick="window.location.href='index.html'"
+        class="w3-button w3-white w3-border w3-round w3-small w3-hover-blue"
+        style="margin-right:10px;">
+        Dashboard
+      </button>
+
+      <span id="lesson-title" style="font-size:20px; font-weight:bold;"></span>
+    </div>
+
+  </div>
+
+  <details class="w3-white w3-margin-top w3-padding" id="lesson-desc-box" style="border-radius:6px;">
+    <summary><strong>Lesson Description</strong></summary>
+    <div id="lesson-desc" class="w3-margin-top"></div>
+  </details>
+</header>
+
+
+<div class="w3-row-padding">
+
+<!-- ==========================================================
+     LEFT COLUMN (Notes + Problem Sets)
+========================================================== -->
+<div class="w3-third">
+
+  <!-- NOTES CARD -->
+  <div class="w3-card w3-white w3-padding w3-margin-top">
+
+    <h3>Notes</h3>
+
+    <!-- Only the editing/creating form collapses -->
+    <details id="note-editor">
+      <summary class="w3-large">Add / Edit Note</summary>
+
+      <div class="w3-margin-top">
+
+        <label class="w3-text">Title:</label>
+        <input id="note-title" class="w3-input w3-border">
+
+        <label class="w3-text">Body (Markdown + AsciiMath %%…%%):</label>
+        <textarea id="note-body" class="w3-input w3-border" rows="5"></textarea>
+
+        <button id="save-note-btn" class="w3-button w3-blue w3-margin-top">Save Note</button>
+
+      </div>
+    </details>
+
+    <hr>
+
+    <!-- NOTES LIST ALWAYS VISIBLE -->
+    <div id="notes-list" class="w3-margin-bottom"></div>
+
+    <h4>Rendered Note</h4>
+    <div id="render-area" class="w3-padding w3-pale-yellow w3-border">
+      (select a note)
+    </div>
+
+  </div>
+
+
+  <!-- PROBLEM SET CREATOR -->
+  <div class="w3-card w3-white w3-padding w3-margin-top">
+
+    <h3>Problem Sets</h3>
+
+    <details id="pset-creator">
+      <summary class="w3-large w3-margin-bottom">Create New Problem Set</summary>
+
+      <label>Name:</label>
+      <input id="pset-name" class="w3-input w3-border">
+
+      <label>Description:</label>
+      <textarea id="pset-desc" rows="3" class="w3-input w3-border"></textarea>
+
+      <label>Questions :</label>
+      <textarea id="pset-questions" rows="5" class="w3-input w3-border">
+question:
+prompt:
+answer:
+      </textarea>
+
+      <button id="save-pset-btn" class="w3-button w3-green w3-margin-top">Save</button>
+    </details>
+
+    <hr>
+
+    <div id="pset-list"></div>
+
+  </div>
+
+</div>
+
+
+
+<!-- ==========================================================
+     RIGHT COLUMN (Workspace + Problem Runner)
+========================================================== -->
+<div class="w3-twothird">
+
+  <!-- WORKSPACE -->
+  <div class="w3-card w3-white w3-padding w3-margin-top">
+
+    <h3>Workspace</h3>
+
+    <div id="workspace" class="w3-border w3-padding w3-white" style="height:260px; overflow-y:auto;"></div>
+
+    <div class="w3-row-padding w3-margin-top">
+      <div class="w3-col s12">
+
+        <!-- Single ASCII input (Gupta removed) -->
+        <textarea id="asciiBox"
+                  class="w3-input w3-border"
+                  style="height:40px;"
+                  placeholder="Enter ASCII math, e.g. sin(x)+cos(2x)"></textarea>
+
+        <div class="w3-margin-top">
+          <button id="sendBtn" class="w3-button w3-blue w3-margin-right">Send</button>
+          <button id="clearWorkspaceBtn" class="w3-button w3-red">Clear</button>
+
+          <label style="margin-left:10px;">
+            <input type="checkbox" id="checkStepBox">
+            Check Steps
+          </label>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+
+
+  <!-- PROBLEM RUNNER -->
+  <div id="pset-runner" class="w3-card w3-white w3-padding w3-margin-top" style="display:none;">
+
+    <h3 id="pset-runner-title"></h3>
+    <p id="pset-runner-desc"></p>
+
+    <div id="pset-question-box" class="w3-padding w3-pale-blue w3-border"></div>
+
+    <input id="pset-answer" class="w3-input w3-border w3-margin-top" placeholder="Your answer">
+
+    <div class="w3-margin-top">
+      <button id="prev-q-btn" class="w3-button w3-grey">Previous</button>
+      <button id="next-q-btn" class="w3-button w3-grey">Next</button>
+      <button id="check-pset-btn" class="w3-button w3-blue">Check Answers</button>
+    </div>
+
+    <h4 id="pset-result" class="w3-margin-top"></h4>
+
+  </div>
+
+</div>
+</div>
+
+<!-- All app logic lives in mathworks.js -->
+<script src="mathworks.js"></script>
+
+</body>
+</html>
