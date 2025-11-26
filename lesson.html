@@ -54,6 +54,14 @@ window.MathJax = {
     <summary><strong>Lesson Description</strong></summary>
     <div id="lesson-desc" class="w3-margin-top"></div>
   </details>
+
+  <div style="margin-top:8px;">
+    <label style="font-size:0.95em;">
+      <input type="checkbox" id="record-session-checkbox">
+      Record session for this lesson
+    </label>
+    <span id="session-view-banner" class="w3-tag w3-light-grey" style="margin-left:12px; display:none;">Viewing a student session <button id="leave-session-btn" class="w3-button w3-small w3-white">Leave</button></span>
+  </div>
 </header>
 
 
@@ -126,7 +134,12 @@ answer:
     <hr>
 
     <div id="pset-list"></div>
-
+    
+    <!-- SESSIONS (teacher-only) -->
+    <div id="sessions-panel" class="w3-card w3-white w3-padding w3-margin-top" style="display:none;">
+      <h3>Recorded Sessions</h3>
+      <div id="session-list">(no sessions)</div>
+    </div>
   </div>
 
 </div>
@@ -193,8 +206,8 @@ answer:
 </div>
 </div>
 
-<!-- All app logic lives in workspace.js -->
-<script src="workspace.js"></script>
+<!-- All app logic lives in lesson.js -->
+<script src="lesson.js"></script>
 
 </body>
 </html>

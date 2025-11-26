@@ -48,6 +48,10 @@
 <h1>MathWorks Dashboard</h1>
 <div id="userInfo"></div>
 
+<label style="margin-bottom:12px; display:block;">
+  <input type="checkbox" id="default-record-session"> Record session by default when opening a lesson
+</label>
+
 <div id="loginBox" class="card">
   <h3>Login</h3>
   <label>Username:</label>
@@ -226,7 +230,9 @@ async function loadLessons() {
     btn.onclick = () => {
       const fullId = btn.getAttribute("data-id");        // "lesson:7.4-sum-to-product"
       const shortId = fullId.replace("lesson:","");      // "7.4-sum-to-product"
-      location.href = "mathworks.html?lesson=" + encodeURIComponent(shortId);
+      const rec = document.getElementById('default-record-session') && document.getElementById('default-record-session').checked;
+      const url = 'lesson.html?lesson=' + encodeURIComponent(shortId) + (rec ? '&record=1' : '');
+      location.href = url;
     };
   });
 }

@@ -63,11 +63,24 @@ let session = {
   lesson: effectiveLesson,
   started: Date.now(),
   completedQuestions: {},
-  workspaces: {},       // already implemented!
-  answers: {},          // we can store these too if you want
+  workspaces: [],       // Array where workspaces[i] = {steps: [...], input: "..."} for question i
+  answers: [],          // Array where answers[i] = student's answer for question i
   score: null,
   submitted: false
 };
+
+// Session persistence helpers
+const recordKey = `recordSession:${effectiveLesson}:${currentUser.username}`;
+// If URL param 'record=1' supplied, respect that and persist to localStorage.
+const recordParam = params.get('record');
+if (recordParam === '1' || recordParam === 'true') {
+  session.recorded = true;
+  localStorage.setItem(recordKey, 'true');
+} else {
+  session.recorded = (localStorage.getItem(recordKey) === "true");
+}
+session.sessionDoc = null;    // will hold the saved session doc when recording
+session.viewingSession = null; // when teacher is viewing/joining a student session
 
 /* ==========================================================
       SMALL STARTUP TWEAKS
@@ -308,6 +321,24 @@ function extractVars(expr) {
   )];
 }
 
+// Convert array-like objects into arrays for easier handling.
+// Accepts Arrays (returns as-is), numeric-keyed objects ({0:..,1:..}) or general
+// objects of workspace entries and returns an array of the values in numeric order
+// when possible or a best-effort Object.values fallback.
+function normalizeArrayLike(obj) {
+  if (!obj) return [];
+  if (Array.isArray(obj)) return obj;
+  if (typeof obj === 'object') {
+    const numericKeys = Object.keys(obj).filter(k => /^\d+$/.test(k));
+    if (numericKeys.length > 0) {
+      numericKeys.sort((a,b) => Number(a) - Number(b));
+      return numericKeys.map(k => obj[k]);
+    }
+    return Object.values(obj);
+  }
+  return [];
+}
+
 /* ==========================================================
       PREPROCESSOR — trig^n x → (trig(x))^n
 ========================================================== */
@@ -409,7 +440,16 @@ function numericEq(exprA, exprB, trials = 6) {
   const varsB = extractVars(exprB);
   const vars = [...new Set([...varsA, ...varsB])];
 
-  for (let i = 0; i < trials; i++) {
+  // We'll attempt to obtain `trials` successful numeric evaluations. Expressions
+  // that produce non-finite values (e.g. sqrt of a negative) will be skipped
+  // and retried up to maxAttempts; otherwise a domain error would cause a
+  // false negative. If we cannot gather enough valid samples, return false.
+  const maxAttempts = Math.max(trials * 10, 30);
+  let successes = 0;
+  let attempts = 0;
+
+  while (successes < trials && attempts < maxAttempts) {
+    attempts++;
     let scope = {};
     vars.forEach(v => scope[v] = Math.random() * 4 - 2);
 
@@ -417,14 +457,31 @@ function numericEq(exprA, exprB, trials = 6) {
       const valA = math.evaluate(exprA, scope);
       const valB = math.evaluate(exprB, scope);
 
-      if (!Number.isFinite(valA) || !Number.isFinite(valB)) return false;
+      // Only compare numeric values. math.evaluate may return Complex or
+      // other non-number values; skip those trials.
+      if (typeof valA !== 'number' || typeof valB !== 'number') {
+        continue;
+      }
+
+      if (!Number.isFinite(valA) || !Number.isFinite(valB)) {
+        // Skip domain errors such as sqrt(negative), division by zero, etc.
+        continue;
+      }
+
       if (Math.abs(valA - valB) > 1e-6) return false;
 
-    } catch {
-      return false;
+      // This trial succeeded
+      successes++;
+
+    } catch (e) {
+      // Evaluation failed (domain or parse errors); skip and try again
+      continue;
     }
   }
-  return true;
+
+  // If we managed `trials` successful comparisons and none differed, assume
+  // numeric equality; otherwise we couldn't validate enough points.
+  return successes >= trials;
 }
 
 
@@ -466,7 +523,10 @@ function addStep() {
     steps.push(expr);
 
     // Save to session
-    session.workspaces[index] = [...steps];
+    const asciiBoxNow = document.getElementById('asciiBox');
+    const inputVal = asciiBoxNow ? asciiBoxNow.value : "";
+    session.workspaces[index] = { steps: [...steps], input: inputVal };
+    saveSession();
 
     workspaceEl.innerHTML += `<div>%%${expr}%%</div>`;
     MathJax.typesetPromise([workspaceEl]);
@@ -481,7 +541,10 @@ function addStep() {
   steps.push(expr);
 
   // Save to session
-  session.workspaces[index] = [...steps];
+  const asciiBoxNow = document.getElementById('asciiBox');
+  const inputVal = asciiBoxNow ? asciiBoxNow.value : "";
+  session.workspaces[index] = { steps: [...steps], input: inputVal };
+  saveSession();
 
   workspaceEl.innerHTML += `<div>%%${expr}%%</div>`;
   MathJax.typesetPromise([workspaceEl]);
@@ -492,6 +555,11 @@ document.getElementById("sendBtn").onclick = addStep;
 document.getElementById("clearWorkspaceBtn").onclick = () => {
   workspaceEl.innerHTML = "";
   steps = [];
+  const asciiBoxEl = document.getElementById('asciiBox');
+  if (asciiBoxEl) asciiBoxEl.value = '';
+  // persist cleared workspace for current index
+  session.workspaces[index] = { steps: [], input: '' };
+  saveSession();
 };
 
 /* ==========================================================
@@ -681,7 +749,10 @@ let answers = [];
 function startPSet(ps) {
   currentPS = ps;
   index = 0;
-  answers = [];
+  // Initialize session.answers array if not already set
+  if (!Array.isArray(session.answers) || session.answers.length === 0) {
+    session.answers = new Array(ps.questions.length).fill("");
+  }
 
   document.getElementById("pset-runner").style.display = "block";
   document.getElementById("pset-runner-title").textContent = ps.name;
@@ -700,11 +771,18 @@ function showQ() {
     
     // If this question has stored work, restore it
     if (session.workspaces[index]) {
-        steps = [...session.workspaces[index]];
+        const saved = session.workspaces[index];
+        if (saved && saved.steps) {
+            steps = [...saved.steps];
+        } else if (Array.isArray(saved)) {
+            // backwards compatibility
+            steps = [...saved];
+        }
     } else {
         // Start fresh with the question itself
         steps = [cleanQ];
-        session.workspaces[index] = [...steps];
+      session.workspaces[index] = { steps: [...steps], input: cleanQ };
+      saveSession();
     }
 
     // Render steps
@@ -729,13 +807,19 @@ function showQ() {
   // Load question into ASCII workspace input
   const asciiBox = document.getElementById("asciiBox");
   if (asciiBox) {
-    asciiBox.value = cleanQ;
+    // Restore saved input for this question if present
+    const saved = session.workspaces[index];
+    if (saved && saved.input !== undefined) {
+      asciiBox.value = saved.input;
+    } else {
+      asciiBox.value = cleanQ;
+    }
     asciiBox.selectionStart = asciiBox.selectionEnd = asciiBox.value.length;
     asciiBox.focus();
   }
 
   // RESTORE ANSWER + NAV BUTTONS
-  document.getElementById("pset-answer").value = answers[index] || "";
+  document.getElementById("pset-answer").value = session.answers[index] || "";
 
   document.getElementById("prev-q-btn").disabled = (index === 0);
   document.getElementById("next-q-btn").disabled =
@@ -747,29 +831,33 @@ function showQ() {
 
 document.getElementById("prev-q-btn").onclick = () => {
     // Save current workspace before moving
-    session.workspaces[index] = [...steps];
+  const asciiNow = document.getElementById('asciiBox');
+  session.workspaces[index] = { steps: [...steps], input: asciiNow ? asciiNow.value : '' };
+  session.answers[index] = document.getElementById("pset-answer").value;
+  saveSession();
 
-    answers[index] = document.getElementById("pset-answer").value;
     index--;
     showQ();
 
 };
 
 document.getElementById("next-q-btn").onclick = () => {
-    session.workspaces[index] = [...steps];
-    answers[index] = document.getElementById("pset-answer").value;
+  const asciiNow = document.getElementById('asciiBox');
+  session.workspaces[index] = { steps: [...steps], input: asciiNow ? asciiNow.value : '' };
+  session.answers[index] = document.getElementById("pset-answer").value;
+  saveSession();
     index++;
     showQ();
 };
 
 document.getElementById("check-pset-btn").onclick = () => {
-  answers[index] = document.getElementById("pset-answer").value;
+  session.answers[index] = document.getElementById("pset-answer").value;
 
   let correct = 0;
   let report = `<h4>Results</h4>`;
 
   currentPS.questions.forEach((q, i) => {
-    const student = (answers[i] || "").trim();
+    const student = (session.answers[i] || "").trim();
     const expected = q.answer.trim();
     const ok = numericEq(expected, student);
 
@@ -804,11 +892,266 @@ document.getElementById("check-pset-btn").onclick = () => {
   resultBox.innerHTML = report;
 
   // MathJax render all math
+  // persist student's answers/score if recording
+  session.submitted = true;
+  session.score = correct;
+  saveSession();
+
   MathJax.typesetPromise([resultBox]);
 };
 
 
 loadProblemSets();
+
+/* ==========================================================
+      SESSION PERSISTENCE + TEACHER VIEW
+========================================================== */
+
+async function saveSession() {
+  if (!session.recorded) return;
+  try {
+    if (!session.sessionDoc) {
+      // create initial doc
+      session.sessionDoc = {
+        _id: `session:${effectiveLesson}:${currentUser.username}:${Date.now()}`,
+        type: "session",
+        lesson: effectiveLesson,
+        user: currentUser.username,
+        started: session.started,
+        workspaces: normalizeArrayLike(session.workspaces),
+        answers: normalizeArrayLike(session.answers),
+        submitted: session.submitted || false,
+        score: session.score || null,
+        lastUpdated: Date.now()
+      };
+      const res = await db.put(session.sessionDoc);
+      session.sessionDoc._rev = res.rev;
+      // Ensure in-memory session.workspaces/answers are native arrays
+      session.workspaces = normalizeArrayLike(session.workspaces);
+      session.answers = normalizeArrayLike(session.answers);
+      console.log('Saved new session doc', session.sessionDoc._id, res.rev);
+    } else {
+      // update fields and save
+      session.sessionDoc.workspaces = normalizeArrayLike(session.workspaces);
+      session.sessionDoc.answers = normalizeArrayLike(session.answers);
+      session.sessionDoc.submitted = session.submitted || false;
+      session.sessionDoc.score = session.score || null;
+      session.sessionDoc.lastUpdated = Date.now();
+      const res = await db.put(session.sessionDoc);
+      session.sessionDoc._rev = res.rev;
+      // Ensure in-memory session.workspaces/answers are native arrays
+      session.workspaces = normalizeArrayLike(session.workspaces);
+      session.answers = normalizeArrayLike(session.answers);
+      console.log('Updated session doc', session.sessionDoc._id, res.rev);
+    }
+    // refresh sessions list (for teachers)
+    if (currentUser.role === 'teacher') loadSessions();
+  } catch (e) {
+    console.error("Failed to save session:", e);
+  }
+}
+
+// Ensure session is saved before leaving the page (clicking Dashboard, closing tab, etc.)
+window.addEventListener('beforeunload', (ev) => {
+  if (session.recorded) {
+    // Attempt synchronous save (best-effort); fallback to async save
+    try {
+      // navigator.sendBeacon could be used, but PouchDB doesn't expose a syncable beacon.
+      // Call saveSession (async) but browser may not wait — still better than nothing.
+      saveSession();
+    } catch (e) {
+      console.warn('beforeunload saveSession failed', e);
+    }
+  }
+});
+
+function renderSessionsList(sessions) {
+  const list = document.getElementById("session-list");
+  if (!list) return;
+  if (!sessions.length) {
+    list.innerHTML = "(no sessions)";
+    return;
+  }
+
+  list.innerHTML = "";
+  sessions.forEach(s => {
+    const row = document.createElement("div");
+    row.className = "w3-padding-small w3-border-bottom w3-hover-light-grey";
+
+    const title = document.createElement("div");
+    const ts = new Date(s.lastUpdated || s.started).toLocaleString();
+    title.innerHTML = `<strong>${s.user}</strong> — <span class='w3-small w3-text-grey'>${ts}</span>`;
+    row.appendChild(title);
+
+    const actions = document.createElement("div");
+    actions.style.float = "right";
+
+    const joinBtn = document.createElement("button");
+    joinBtn.className = "w3-button w3-small w3-light-grey";
+    joinBtn.textContent = "Join";
+    joinBtn.onclick = () => joinSession(s);
+    actions.appendChild(joinBtn);
+
+    const viewBtn = document.createElement("button");
+    viewBtn.className = "w3-button w3-small w3-white";
+    viewBtn.style.marginLeft = "6px";
+    viewBtn.textContent = "View";
+    viewBtn.onclick = () => {
+      // show full session contents in the workspace area (read-only view)
+      joinSession(s, {readOnly:true});
+    };
+    actions.appendChild(viewBtn);
+
+    row.appendChild(actions);
+    list.appendChild(row);
+  });
+}
+
+function loadSessions() {
+  loadDocs("session").then(sessions => {
+    sessions = sessions.filter(s => s.lesson === effectiveLesson);
+    // sort by user then by date desc
+    sessions.sort((a,b) => {
+      if (a.user === b.user) return (b.lastUpdated || b.started) - (a.lastUpdated || a.started);
+      return a.user.localeCompare(b.user);
+    });
+    // Backwards-compatibility: normalize persisted session docs so they store
+    // native JS Arrays rather than objects with numeric keys.
+    sessions.forEach((s) => {
+      let changed = false;
+      const newWorkspaces = normalizeArrayLike(s.workspaces);
+      const newAnswers = normalizeArrayLike(s.answers);
+      if (Array.isArray(s.workspaces) === false && newWorkspaces.length > 0) {
+        s.workspaces = newWorkspaces;
+        changed = true;
+      }
+      if (Array.isArray(s.answers) === false && newAnswers.length > 0) {
+        s.answers = newAnswers;
+        changed = true;
+      }
+      if (changed) {
+        // Save normalized doc back so future reads are consistent
+        db.put(s).then(res => console.log('Normalized session doc', s._id, res.rev))
+          .catch(e => console.warn('Failed to normalize session doc', s._id, e));
+      }
+    });
+    renderSessionsList(sessions);
+    // show panel for teachers
+    if (currentUser.role === "teacher") {
+      const panel = document.getElementById("sessions-panel");
+      if (panel) panel.style.display = "block";
+    }
+  });
+}
+
+function joinSession(doc, opts = {}) {
+  // doc: session document
+  if (!doc) return;
+
+  // mark that teacher is viewing
+  session.viewingSession = doc._id || (doc.type + ":" + doc.user + ":" + (doc.started||0));
+
+  // Render session into workspace showing all student work in sequence
+  workspaceEl.innerHTML = "";
+
+  // doc.workspaces used to be an array, but older/alternate codepaths
+  // or some persisted documents might store workspaces as an object
+  // with numeric keys (e.g. {0:..., 1:...}) rather than a real Array.
+  // Normalize into an array to be defensive here.
+
+  const workspaces = normalizeArrayLike(doc.workspaces);
+  const answers = normalizeArrayLike(doc.answers);
+
+  if (!Array.isArray(doc.workspaces)) console.warn('joinSession: doc.workspaces is not an Array; normalized for display', doc.workspaces);
+  if (!Array.isArray(doc.answers) && doc.answers) console.warn('joinSession: doc.answers is not an Array; normalized for display', doc.answers);
+
+  if (workspaces && workspaces.length > 0) {
+    // For each question's workspace, show the saved steps
+    workspaces.forEach((ws, qIdx) => {
+      if (!ws) return;
+      
+      workspaceEl.innerHTML += `<div style="margin-bottom:20px; padding-bottom:10px; border-bottom:1px solid #ccc;">`;
+      workspaceEl.innerHTML += `<strong style="color:#666;">Question ${qIdx+1}:</strong>`;
+      
+      const steps = ws.steps || (Array.isArray(ws) ? ws : []);
+      if (steps.length === 0) {
+        workspaceEl.innerHTML += `<div class="w3-text-grey w3-small">(no work saved)</div>`;
+      } else {
+        steps.forEach(s => {
+          workspaceEl.innerHTML += `<div>%%${s}%%</div>`;
+        });
+      }
+      
+      // Show the student's answer if available
+      if (answers && answers[qIdx]) {
+        workspaceEl.innerHTML += `<div style="margin-top:8px; background:#f0f0f0; padding:6px; border-radius:3px;">`;
+        workspaceEl.innerHTML += `<span class="w3-small w3-text-grey">Final answer:</span> %%${answers[qIdx]}%%`;
+        workspaceEl.innerHTML += `</div>`;
+      }
+      
+      workspaceEl.innerHTML += `</div>`;
+    });
+  } else {
+    workspaceEl.innerHTML = "(no saved work)";
+  }
+
+  MathJax.typesetPromise([workspaceEl]);
+  workspaceEl.scrollTop = workspaceEl.scrollHeight;
+
+  // Disable input while viewing
+  const asciiBox = document.getElementById("asciiBox");
+  const sendBtn = document.getElementById("sendBtn");
+  if (asciiBox) asciiBox.disabled = true;
+  if (sendBtn) sendBtn.disabled = true;
+
+  // Show banner with leave button
+  const banner = document.getElementById("session-view-banner");
+  if (banner) banner.style.display = "inline-block";
+}
+
+function leaveSessionView() {
+  // Re-enable input and clear viewing flag
+  session.viewingSession = null;
+  const asciiBox = document.getElementById("asciiBox");
+  const sendBtn = document.getElementById("sendBtn");
+  if (asciiBox) asciiBox.disabled = false;
+  if (sendBtn) sendBtn.disabled = false;
+
+  const banner = document.getElementById("session-view-banner");
+  if (banner) banner.style.display = "none";
+
+  // Reload current workspace (either pset view or regular)
+  if (currentPS) showQ();
+  else {
+    // clear and show any current steps variable
+    workspaceEl.innerHTML = "";
+    steps.forEach(s => workspaceEl.innerHTML += `<div>%%${s}%%</div>`);
+    MathJax.typesetPromise([workspaceEl]);
+  }
+}
+
+// wire up leave button
+document.addEventListener('DOMContentLoaded', () => {
+  const leaveBtn = document.getElementById('leave-session-btn');
+  if (leaveBtn) leaveBtn.onclick = leaveSessionView;
+
+  // set record checkbox initial state and handler
+  const recBox = document.getElementById('record-session-checkbox');
+  if (recBox) {
+    recBox.checked = session.recorded;
+    recBox.onchange = () => {
+      session.recorded = !!recBox.checked;
+      localStorage.setItem(recordKey, session.recorded ? 'true' : 'false');
+      if (session.recorded) {
+        // create an initial save immediately
+        saveSession();
+      }
+    };
+  }
+
+  // If teacher, load sessions
+  if (currentUser.role === 'teacher') loadSessions();
+});
 
 /* ==========================================================
       REALTIME LIVE UPDATES
@@ -824,4 +1167,5 @@ db.changes({
 
   if (d.type === "note" && d.lesson === effectiveLesson) loadNotes();
   if (d.type === "pset" && d.lesson === effectiveLesson) loadProblemSets();
+  if (d.type === "session" && d.lesson === effectiveLesson) loadSessions();
 });
