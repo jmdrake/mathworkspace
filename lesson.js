@@ -358,6 +358,14 @@ function preprocess(expr) {
     (m, fn, power, variable) => `(${fn}(${variable}))^${power}`
   );
 
+  // Insert implicit multiplication between a single-letter variable and a following
+  // parentheses, e.g., `x(2)` -> `x*(2)`. Avoid inserting a star for known
+  // function names like sin, cos, etc.
+  expr = expr.replace(/([A-Za-zθφπμ])\s*\(/g, (m, varName) => {
+    if (builtinNames.has(varName)) return `${varName}(`;
+    return `${varName}*(`;
+  });
+
   return expr;
 }
 
@@ -513,6 +521,18 @@ function addStep() {
       equivalent = numericEq(prev, expr);
     }
 
+    // If a step is not equivalent to the previous step, allow it if it
+    // simplifies to the final answer. This helps students submit the final
+    // answer directly as a valid step (e.g., converting radians to degrees).
+    if (!equivalent && currentPS && currentPS.questions && currentPS.questions[index]) {
+      const finalAns = (currentPS.questions[index].answer || "").trim();
+      if (finalAns) {
+        if ((finalAns.includes("=") && equationEq(expr, finalAns)) || numericEq(expr, finalAns)) {
+          equivalent = true;
+        }
+      }
+    }
+
     if (!equivalent) {
       workspaceEl.innerHTML += `<div class='w3-text-red'>✘ Not equivalent</div>`;
       return;
@@ -586,7 +606,10 @@ function loadProblemSets() {
       nameSpan.onclick = () => startPSet(ps);
       row.appendChild(nameSpan);
 
-      if (currentUser.role === "teacher") {
+      const isOwner = ps.user === currentUser.username;
+      const isTeacherCreator = ps.role === 'teacher';
+      const canEdit = (currentUser.role === "teacher") || (isOwner && !isTeacherCreator);
+      if (canEdit) {
         // ✏️ EDIT
         const edit = document.createElement("span");
         edit.textContent = "🖉";
@@ -624,10 +647,8 @@ function loadProblemSets() {
 document.getElementById("save-pset-btn").onclick = saveNewPSet;
 
 function saveNewPSet() {
-  if (currentUser.role !== "teacher") {
-    alert("Only teachers can create problem sets.");
-    return;
-  }
+  // Allow any logged-in user to create a PSet. We'll record the user's role
+  // on the document so the UI can restrict edits/deletes accordingly.
 
   const name = document.getElementById("pset-name").value.trim();
   const desc = document.getElementById("pset-desc").value.trim();
@@ -667,6 +688,12 @@ function startEditPSet(ps) {
     if (q.prompt) {
       text += "prompt: " + q.prompt + "\n";
     }
+    if (q.options && Object.keys(q.options).length > 0) {
+      text += "options:\n";
+      Object.keys(q.options).forEach(opt => {
+        text += `${opt}: ${q.options[opt]}\n`;
+      });
+    }
     text += "answer: "   + q.answer   + "\n\n";
   });
 
@@ -705,17 +732,21 @@ function saveEditedPSet() {
 }
 
 function parseQuestions(raw) {
-  const lines = raw.split("\n").map(l => l.trim()).filter(Boolean);
+  const rawLines = raw.split("\n");
+  const lines = rawLines.map(l => l.replace(/\r/g, "").replace(/\t/g, " ")).map(l => l.trimEnd());
   const questions = [];
   let currentQ = null;
 
-  for (let line of lines) {
+  for (let i = 0; i < lines.length; i++) {
+    let line = lines[i].trim();
+    if (!line) continue;
     if (line.toLowerCase().startsWith("question:")) {
       if (currentQ) questions.push(currentQ);
       currentQ = {
         question: line.substring(9).trim(),
         prompt: "",
-        answer: ""
+        answer: "",
+        options: null
       };
     } else if (line.toLowerCase().startsWith("prompt:")) {
       if (!currentQ) {
@@ -723,6 +754,26 @@ function parseQuestions(raw) {
         return [];
       }
       currentQ.prompt = line.substring(7).trim();
+    } else if (line.toLowerCase().startsWith("options:")) {
+      if (!currentQ) {
+        alert("Found 'options:' before any 'question:' line.");
+        return [];
+      }
+      // Parse following option lines like 'A: text'
+      currentQ.options = {};
+      for (let j = i+1; j < lines.length; j++) {
+        const optLine = lines[j] || "";
+        const match = optLine.match(/^\s*([A-Za-z])\s*:\s*(.*)$/);
+        if (match) {
+          const key = match[1].toUpperCase();
+          const val = match[2].trim();
+          currentQ.options[key] = val;
+          // consume this line
+          i = j;
+        } else {
+          break; // stop options block
+        }
+      }
     } else if (line.toLowerCase().startsWith("answer:")) {
       if (!currentQ) {
         alert("Found 'answer:' before any 'question:' line.");
@@ -767,7 +818,9 @@ function showQ() {
   // RESET WORKSPACE
     workspaceEl.innerHTML = "";
 
-    const cleanQ = q.question.replace(/%%/g, "");
+    // `q.prompt` is the default input (raw value); `q.question` is the human
+    // readable question. Fall back to `question` for backward compatibility.
+    const cleanQ = (q.prompt || q.question).replace(/%%/g, "");
     
     // If this question has stored work, restore it
     if (session.workspaces[index]) {
@@ -819,7 +872,43 @@ function showQ() {
   }
 
   // RESTORE ANSWER + NAV BUTTONS
-  document.getElementById("pset-answer").value = session.answers[index] || "";
+  const answerInput = document.getElementById("pset-answer");
+  // Remove any previous MCQ container
+  const mcqContainerId = 'pset-answer-mcq';
+  let existingMcq = document.getElementById(mcqContainerId);
+  if (existingMcq) existingMcq.remove();
+
+  if (q.options && Object.keys(q.options).length > 0) {
+    // Build radio buttons for multiple choice
+    const mcqWrap = document.createElement('div');
+    mcqWrap.id = mcqContainerId;
+    mcqWrap.className = 'w3-margin-top';
+
+    const selected = session.answers[index] || "";
+    Object.keys(q.options).forEach(opt => {
+      const optId = `pset-mcq-${index}-${opt}`;
+      const label = document.createElement('label');
+      label.style.display = 'block';
+      label.innerHTML = `\n        <input type=\"radio\" name=\"pset-mcq-${index}\" id=\"${optId}\" value=\"${opt}\">    <strong>${opt}:</strong> ${q.options[opt]}\n      `;
+      mcqWrap.appendChild(label);
+    });
+
+    // Insert after the pset-question-box
+    box.parentNode.insertBefore(mcqWrap, answerInput.nextSibling);
+    // Hide the freeform answer input when MCQ present
+    if (answerInput) answerInput.style.display = 'none';
+
+    // Restore selected choice, if any
+    if (selected) {
+      const chosen = document.querySelector(`input[name=\"pset-mcq-${index}\"][value=\"${selected}\"]`);
+      if (chosen) chosen.checked = true;
+    }
+  } else {
+    if (answerInput) {
+      answerInput.style.display = '';
+      answerInput.value = session.answers[index] || "";
+    }
+  }
 
   document.getElementById("prev-q-btn").disabled = (index === 0);
   document.getElementById("next-q-btn").disabled =
@@ -833,7 +922,14 @@ document.getElementById("prev-q-btn").onclick = () => {
     // Save current workspace before moving
   const asciiNow = document.getElementById('asciiBox');
   session.workspaces[index] = { steps: [...steps], input: asciiNow ? asciiNow.value : '' };
-  session.answers[index] = document.getElementById("pset-answer").value;
+  // For MCQ, read selected radio; otherwise read freeform input
+  const currentQ = currentPS.questions[index];
+  if (currentQ && currentQ.options && Object.keys(currentQ.options).length > 0) {
+    const sel = document.querySelector(`input[name=\"pset-mcq-${index}\"]:checked`);
+    session.answers[index] = sel ? sel.value : '';
+  } else {
+    session.answers[index] = document.getElementById("pset-answer").value;
+  }
   saveSession();
 
     index--;
@@ -844,22 +940,44 @@ document.getElementById("prev-q-btn").onclick = () => {
 document.getElementById("next-q-btn").onclick = () => {
   const asciiNow = document.getElementById('asciiBox');
   session.workspaces[index] = { steps: [...steps], input: asciiNow ? asciiNow.value : '' };
-  session.answers[index] = document.getElementById("pset-answer").value;
+  const currentQ = currentPS.questions[index];
+  if (currentQ && currentQ.options && Object.keys(currentQ.options).length > 0) {
+    const sel = document.querySelector(`input[name=\"pset-mcq-${index}\"]:checked`);
+    session.answers[index] = sel ? sel.value : '';
+  } else {
+    session.answers[index] = document.getElementById("pset-answer").value;
+  }
   saveSession();
     index++;
     showQ();
 };
 
 document.getElementById("check-pset-btn").onclick = () => {
-  session.answers[index] = document.getElementById("pset-answer").value;
+  const currentQ = currentPS.questions[index];
+  if (currentQ && currentQ.options && Object.keys(currentQ.options).length > 0) {
+    const sel = document.querySelector(`input[name=\"pset-mcq-${index}\"]:checked`);
+    session.answers[index] = sel ? sel.value : '';
+  } else {
+    session.answers[index] = document.getElementById("pset-answer").value;
+  }
 
   let correct = 0;
   let report = `<h4>Results</h4>`;
 
   currentPS.questions.forEach((q, i) => {
-    const student = (session.answers[i] || "").trim();
-    const expected = q.answer.trim();
-    const ok = numericEq(expected, student);
+      const student = (session.answers[i] || "").toString().trim();
+      const expected = (q.answer || "").toString().trim();
+      let ok = false;
+      if (q.options && Object.keys(q.options).length > 0) {
+        // Multiple choice: compare option labels (e.g., 'A', 'B') case-insentive
+        ok = student.toUpperCase() === expected.toUpperCase();
+      } else if (expected.includes('=')) {
+        // Equation compare
+        ok = equationEq(expected, student);
+      } else {
+        // Numeric compare
+        ok = numericEq(expected, student);
+      }
 
     if (ok) {
       correct++;
@@ -871,10 +989,10 @@ document.getElementById("check-pset-btn").onclick = () => {
           <span class="w3-small">${q.question}</span><br><br>
 
           <strong>Your answer:</strong><br>
-          %%${student || "(blank)"}%%<br><br>
+          %%${q.options && q.options[student] ? `${student}: ${q.options[student]}` : (student || "(blank)")}%%<br><br>
 
           <strong>Correct answer:</strong><br>
-          %%${expected}%%
+          %%${q.options && q.options[expected] ? `${expected}: ${q.options[expected]}` : expected}%%
         </div>
       `;
     }
@@ -981,28 +1099,21 @@ function renderSessionsList(sessions) {
     const title = document.createElement("div");
     const ts = new Date(s.lastUpdated || s.started).toLocaleString();
     title.innerHTML = `<strong>${s.user}</strong> — <span class='w3-small w3-text-grey'>${ts}</span>`;
+    // Active indicator: not yet submitted OR recently updated within 2 minutes
+    const activeThresholdMs = 2 * 60 * 1000; // 2 minutes
+    const isActive = (!s.submitted) || (Date.now() - (s.lastUpdated || s.started) < activeThresholdMs);
+    if (isActive) {
+      const act = document.createElement('span');
+      act.className = 'w3-small w3-text-green';
+      act.style.marginLeft = '10px';
+      act.textContent = '⚡ Active';
+      title.appendChild(act);
+    }
     row.appendChild(title);
 
-    const actions = document.createElement("div");
-    actions.style.float = "right";
-
-    const joinBtn = document.createElement("button");
-    joinBtn.className = "w3-button w3-small w3-light-grey";
-    joinBtn.textContent = "Join";
-    joinBtn.onclick = () => joinSession(s);
-    actions.appendChild(joinBtn);
-
-    const viewBtn = document.createElement("button");
-    viewBtn.className = "w3-button w3-small w3-white";
-    viewBtn.style.marginLeft = "6px";
-    viewBtn.textContent = "View";
-    viewBtn.onclick = () => {
-      // show full session contents in the workspace area (read-only view)
-      joinSession(s, {readOnly:true});
-    };
-    actions.appendChild(viewBtn);
-
-    row.appendChild(actions);
+    // Make the whole row clickable to view (read-only) session contents
+    row.style.cursor = 'pointer';
+    row.onclick = () => joinSession(s, {readOnly:true});
     list.appendChild(row);
   });
 }
@@ -1037,7 +1148,7 @@ function loadSessions() {
     });
     renderSessionsList(sessions);
     // show panel for teachers
-    if (currentUser.role === "teacher") {
+    if (canEdit) {
       const panel = document.getElementById("sessions-panel");
       if (panel) panel.style.display = "block";
     }
@@ -1167,5 +1278,12 @@ db.changes({
 
   if (d.type === "note" && d.lesson === effectiveLesson) loadNotes();
   if (d.type === "pset" && d.lesson === effectiveLesson) loadProblemSets();
-  if (d.type === "session" && d.lesson === effectiveLesson) loadSessions();
+  if (d.type === "session" && d.lesson === effectiveLesson) {
+    loadSessions();
+    // If a teacher is viewing this session, mirror updates to their workspace
+    if (session.viewingSession === d._id) {
+      // Pass the doc so we render the up-to-date contents
+      joinSession(d, {readOnly:true});
+    }
+  }
 });

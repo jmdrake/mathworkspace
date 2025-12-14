@@ -66,6 +66,11 @@
 <div id="dashboard" class="hidden">
   <div id="lessonList"></div>
 
+  <div id="coursesList" class="card hidden">
+    <h3>Courses</h3>
+    <div id="courses-panel"></div>
+  </div>
+
     <div id="createLessonCard" class="card hidden">
       <h3>Create Lesson (Teacher)</h3>
 
@@ -79,6 +84,11 @@
         <input id="lessonTitleInput" placeholder="OpenStax 7.4 — Sum to Product">
       </div>
 
+      <div class="form-row">
+        <label>Course:</label><br/>
+        <select id="lessonCourseInput"></select>
+      </div>
+
       <div class="form-row"><br/>
         <label>Description:</label><br/>
         <textarea id="lessonDescInput" rows="3"></textarea>
@@ -87,6 +97,17 @@
       <button class="button small" id="btnCreateLesson">Create</button>
       <div id="lessonCreateMsg" style="color:green; margin-top:6px;"></div>
     </div>
+
+    <div id="createCourseCard" class="card hidden" style="margin-top:12px;">
+      <h3>Create Course (Teacher)</h3>
+      <div class="form-row">
+        <label>Course name:</label>
+        <input id="courseNameInput" placeholder="e.g. Algebra 2">
+      </div>
+      <button class="button small" id="btnCreateCourse">Create Course</button>
+      <div id="courseCreateMsg" style="color:green; margin-top:6px;"></div>
+    </div>
+
 
 
   <button class="button secondary" id="btnLogout">Logout</button>
@@ -214,15 +235,46 @@ async function loadLessons() {
     return;
   }
 
+  // Group lessons by course name (stable sort within groups)
+  const courseMap = {};
   docs.forEach(lesson => {
-    const div = document.createElement("div");
-    div.className = "card";
-    div.innerHTML = `
-      <strong>${lesson.title}</strong>
-      <div style="font-size:0.85em;color:#555;">${lesson.description || ""}</div>
-      <button class="button small" data-id="${lesson._id}">Open Lesson</button>
-    `;
-    lessonList.appendChild(div);
+    const courseName = lesson.course || 'General';
+    if (!courseMap[courseName]) courseMap[courseName] = [];
+    courseMap[courseName].push(lesson);
+  });
+
+  Object.keys(courseMap).sort().forEach(courseName => {
+    const courseId = 'course-' + courseName.replace(/\s+/g,'_');
+    // Build a collapsible details element
+    let detailsEl = document.getElementById(courseId);
+    if (!detailsEl) {
+      detailsEl = document.createElement('details');
+      detailsEl.id = courseId;
+      detailsEl.className = 'card';
+      const summary = document.createElement('summary');
+      summary.style.cursor = 'pointer';
+      summary.style.fontWeight = '700';
+      summary.textContent = courseName;
+      detailsEl.appendChild(summary);
+      const cList = document.createElement('div');
+      cList.className = 'course-lessons';
+      detailsEl.appendChild(cList);
+      lessonList.appendChild(detailsEl);
+    }
+    const cList = detailsEl.querySelector('.course-lessons');
+    // Clear children and re-render
+    cList.innerHTML = '';
+    courseMap[courseName].forEach(lesson => {
+      const div = document.createElement("div");
+      div.className = "card";
+      div.style.marginBottom = '8px';
+      div.innerHTML = `
+        <strong>${lesson.title}</strong>
+        <div style="font-size:0.85em;color:#555;">${lesson.description || ""}</div>
+        <button class="button small" data-id="${lesson._id}">Open Lesson</button>
+      `;
+      cList.appendChild(div);
+    });
   });
 
   // Attach event handlers
@@ -235,6 +287,18 @@ async function loadLessons() {
       location.href = url;
     };
   });
+
+  // Populate lesson course select for creation
+  const lessonSelect = document.getElementById('lessonCourseInput');
+  if (lessonSelect) {
+    // Clear existing options and add General
+    lessonSelect.innerHTML = '';
+    lessonSelect.appendChild(new Option('General','General'));
+    // Add all course groups
+    // Note: lesson course select is now populated by loadCourses() from the
+    // canonical course docs. See loadCourses() which updates the select with
+    // all course names stored in the 'course' documents.
+  }
 }
 
 // --------------------------
@@ -251,6 +315,7 @@ $("btnCreateLesson").onclick = async () => {
     return;
   }
 
+  const course = $("lessonCourseInput").value.trim();
   const fullId = "lesson:" + id;
   try {
     await db.get(fullId);
@@ -263,6 +328,7 @@ $("btnCreateLesson").onclick = async () => {
         type: "lesson",
         title,
         description: desc,
+        course: course || 'General',
         createdAt: new Date().toISOString()
       });
       lessonCreateMsg.style.color = "green";
@@ -274,6 +340,97 @@ $("btnCreateLesson").onclick = async () => {
     }
   }
 };
+
+// --------------------------
+// COURSES
+// --------------------------
+async function loadCourses() {
+  const res = await db.find({ selector: { type: 'course' }, sort: [{ _id: 'asc' }] })
+    .catch(async err => {
+      if (err.status === 404) {
+        await db.createIndex({ index: { fields: ['type'] } });
+        return db.find({ selector: { type: 'course' } });
+      }
+    });
+  const docs = res.docs || [];
+  const panel = document.getElementById('courses-panel');
+  if (!panel) return;
+  panel.innerHTML = '';
+  if (!docs.length) {
+    panel.innerHTML = '<p>No courses yet.</p>';
+    return;
+  }
+  docs.forEach(c => {
+    const row = document.createElement('div');
+    row.className = 'w3-padding-small w3-border-bottom w3-hover-light-grey';
+    const title = document.createElement('div');
+    title.textContent = c.name;
+    row.appendChild(title);
+    const actions = document.createElement('div');
+    actions.style.float = 'right';
+    // Teacher can delete
+    if (currentUser && currentUser.role === 'teacher') {
+      const del = document.createElement('button');
+      del.className = 'button small secondary';
+      del.textContent = 'Delete';
+      del.onclick = async (ev) => {
+        ev.stopPropagation();
+        if (!confirm('Delete this course?')) return;
+        await db.remove(c);
+        await loadCourses();
+        await loadLessons();
+      };
+      actions.appendChild(del);
+    }
+    row.appendChild(actions);
+    panel.appendChild(row);
+  });
+
+  // Populate lesson course select (used in Create Lesson) with all courses
+  const lessonSelect = document.getElementById('lessonCourseInput');
+  if (lessonSelect) {
+    lessonSelect.innerHTML = '';
+    lessonSelect.appendChild(new Option('General', 'General'));
+    docs.forEach(c => {
+      lessonSelect.appendChild(new Option(c.name, c.name));
+    });
+  }
+}
+
+$("btnCreateCourse").onclick = async () => {
+  const name = $("courseNameInput").value.trim();
+  if (!currentUser || currentUser.role !== 'teacher') {
+    $("courseCreateMsg").style.color = 'red';
+    $("courseCreateMsg").textContent = 'Only teachers can create courses.';
+    return;
+  }
+  if (!name) return;
+  // slugify name
+  const slug = name.toLowerCase().replace(/\s+/g, '_');
+  const id = 'course:' + slug;
+  try {
+    await db.get(id);
+    $("courseCreateMsg").style.color = 'red';
+    $("courseCreateMsg").textContent = 'Course id already exists.';
+  } catch (err) {
+    if (err.status === 404) {
+      await db.put({ _id: id, type: 'course', name, createdAt: new Date().toISOString() });
+      $("courseCreateMsg").style.color = 'green';
+      $("courseCreateMsg").textContent = 'Course created.';
+      $("courseNameInput").value = '';
+      await loadCourses();
+      // Select the newly created course in the lesson creation dropdown
+      const lessonSelect = document.getElementById('lessonCourseInput');
+      if (lessonSelect) lessonSelect.value = name;
+      await loadLessons();
+    }
+  }
+};
+
+// When the dashboard is displayed, load courses
+if (currentUser && document.readyState === 'complete') {
+  loadCourses();
+}
 
 // --------------------------
 // DASHBOARD UI
@@ -288,11 +445,20 @@ function showDashboard() {
 
   if (currentUser.role === "teacher") {
     createLessonCard.classList.remove("hidden");
+    const createCourseCard = document.getElementById('createCourseCard');
+    if (createCourseCard) createCourseCard.classList.remove('hidden');
+    const coursesListCard = document.getElementById('coursesList');
+    if (coursesListCard) coursesListCard.classList.remove('hidden');
   } else {
     createLessonCard.classList.add("hidden");
+    const createCourseCard = document.getElementById('createCourseCard');
+    if (createCourseCard) createCourseCard.classList.add('hidden');
+    const coursesListCard = document.getElementById('coursesList');
+    if (coursesListCard) coursesListCard.classList.remove('hidden');
   }
 
   loadLessons();
+  loadCourses();
 }
 
 // --------------------------
